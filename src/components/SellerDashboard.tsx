@@ -7,18 +7,19 @@ import {
   CheckCircle2,
   Package,
   Eye,
-  Loader2,
   Trash2,
   UserCheck,
+  Image as ImageIcon,
 } from 'lucide-react';
 import { Order, OrderStatus, VENDEDORES } from '../types';
 import { OrderStore } from '../services/store';
 import { CameraCapture } from './CameraCapture';
+import { extractExpirationDate } from '../services/orderMatrixParser';
+import { runOrderImportWithProgress } from '../services/orderImporter';
 import {
-  parseOrderMatrixText,
-  extractExpirationDate,
-  ParsedOrderMatrix,
-} from '../services/orderMatrixParser';
+  ImportProgressModal,
+  ImportProgressState,
+} from './ImportProgressModal';
 
 interface SellerDashboardProps {
   sellerName: string;
@@ -37,8 +38,12 @@ export const SellerDashboard: React.FC<SellerDashboardProps> = ({
   isAdmin = false,
   onDeleteOrder,
 }) => {
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadProgressMsg, setUploadProgressMsg] = useState('');
+  const [importProgress, setImportProgress] = useState<ImportProgressState>({
+    active: false,
+    percent: 0,
+    stageText: '',
+    sourceType: 'pdf',
+  });
   const [showCamera, setShowCamera] = useState(false);
   const [pastedImageInfo, setPastedImageInfo] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
@@ -81,98 +86,43 @@ export const SellerDashboard: React.FC<SellerDashboardProps> = ({
 
   const activeOrders = sellerOrders.filter((o) => o.status !== 'Faturado');
 
-  const resolveSellerInfo = (parsedSellerName?: string) => {
-    if (isAdmin) {
-      if (selectedSellerForAdmin !== 'Auto') {
-        return {
-          sellerDisplay: selectedSellerForAdmin.toUpperCase(),
-          sellerNorm: selectedSellerForAdmin,
-        };
-      }
-      if (parsedSellerName) {
-        const matchedVendor = VENDEDORES.find((v) =>
-          parsedSellerName.toLowerCase().includes(v.toLowerCase())
-        );
-        if (matchedVendor) {
-          return {
-            sellerDisplay: parsedSellerName.toUpperCase(),
-            sellerNorm: matchedVendor,
-          };
-        }
-        return {
-          sellerDisplay: parsedSellerName.toUpperCase(),
-          sellerNorm: parsedSellerName,
-        };
-      }
-      return {
-        sellerDisplay: sellerName.toUpperCase() + ' (ADMIN)',
-        sellerNorm: sellerName,
-      };
+  // Unified handler for file (PDF or Photo)
+  const processFile = async (file: File) => {
+    try {
+      const newOrder = await runOrderImportWithProgress({
+        file,
+        userName: sellerName,
+        isAdmin,
+        selectedSellerForAdmin,
+        onProgress: setImportProgress,
+      });
+      onOrderAdded(newOrder);
+    } catch (err) {
+      console.error('Erro na importação de arquivo:', err);
+      setImportProgress((prev) => ({ ...prev, active: false }));
     }
-
-    return {
-      sellerDisplay: parsedSellerName || sellerName.toUpperCase(),
-      sellerNorm: sellerName,
-    };
   };
 
-  const createOrderFromParsedMatrix = (
-    parsed: ParsedOrderMatrix,
-    fileDataUrl?: string,
-    fileType?: 'pdf' | 'image' | 'sample',
-    fileName?: string
-  ): Order => {
-    const { sellerDisplay, sellerNorm } = resolveSellerInfo(parsed.sellerName);
-
-    return {
-      id: 'ped-' + Date.now(),
-      orderNumber:
-        parsed.orderNumber ||
-        String(Math.floor(160000 + Math.random() * 9000)),
-      dateCad: parsed.dateCad || new Date().toLocaleString('pt-BR'),
-      clientCode: parsed.clientCode || '',
-      clientName: parsed.clientName || 'Cliente Importado',
-      clientFantasia: parsed.clientFantasia || '',
-      clientAddress: parsed.clientAddress || '',
-      cnpj: parsed.cnpj || '',
-      transport: parsed.transport || 'TRANSRAPIDO LOGISTICA LTDA',
-      route: parsed.route || '1 - LOCAL',
-      sellerName: sellerDisplay,
-      sellerNormalized: sellerNorm,
-      status: 'Pendente',
-      totalItems: parsed.items?.length || 0,
-      totalValue: parsed.totalValue || 0,
-      fileDataUrl,
-      fileType,
-      fileName,
-      createdAt: Date.now(),
-      dateKey: new Date().toISOString().split('T')[0],
-      items: (parsed.items || []).map((it, idx) => {
-        const expDate =
-          it.expirationDate || extractExpirationDate(it.lotInfo) || '-';
-        return {
-          id: `item-${Date.now()}-${idx}`,
-          code: it.code || `SKU-${idx + 1}`,
-          description: it.description || 'Produto sem descrição',
-          presentation: it.presentation || '',
-          manufacturer: it.manufacturer || 'PADRÃO',
-          expirationDate: expDate,
-          quantityOrdered: Number(it.quantityOrdered) || 1,
-          quantitySeparated: Number(it.quantityOrdered) || 1,
-          unit: it.unit || 'UN',
-          unitPrice: Number(it.unitPrice) || 0,
-          totalPrice: Number(it.totalPrice) || 0,
-          location: it.location || '-',
-          lotInfo: it.lotInfo || (expDate !== '-' ? `L->${expDate}` : ''),
-          checked: false,
-        };
-      }),
-    };
+  // Unified handler for Camera Capture base64
+  const processCameraCapture = async (base64DataUrl: string) => {
+    try {
+      const newOrder = await runOrderImportWithProgress({
+        cameraBase64: base64DataUrl,
+        userName: sellerName,
+        isAdmin,
+        selectedSellerForAdmin,
+        onProgress: setImportProgress,
+      });
+      onOrderAdded(newOrder);
+    } catch (err) {
+      console.error('Erro na importação por fotografia:', err);
+      setImportProgress((prev) => ({ ...prev, active: false }));
+    }
   };
 
-  // Handle Clipboard Paste (Ctrl + V) for both Images and Text
+  // Handle Clipboard Paste (Ctrl + V) for both Images and Text with 0-100% progress bar
   useEffect(() => {
-    const handlePaste = (e: ClipboardEvent) => {
+    const handlePaste = async (e: ClipboardEvent) => {
       const target = e.target as HTMLElement;
       if (
         target &&
@@ -185,16 +135,16 @@ export const SellerDashboard: React.FC<SellerDashboardProps> = ({
 
       if (!e.clipboardData) return;
 
-      // Check for pasted image
+      // Check for pasted image / screenshot
       if (e.clipboardData.items) {
         for (let i = 0; i < e.clipboardData.items.length; i++) {
           const item = e.clipboardData.items[i];
           if (item.type.indexOf('image') !== -1) {
             const file = item.getAsFile();
             if (file) {
-              processFile(file);
-              setPastedImageInfo('Imagem recebida da área de transferência (Ctrl+V)!');
+              setPastedImageInfo('Fotografia/Imagem colada (Ctrl+V)!');
               setTimeout(() => setPastedImageInfo(null), 4000);
+              await processFile(file);
               return;
             }
           }
@@ -204,76 +154,27 @@ export const SellerDashboard: React.FC<SellerDashboardProps> = ({
       // Check for pasted text from PDF / ERP order sheet
       const pastedText = e.clipboardData.getData('text/plain');
       if (pastedText && pastedText.trim().length > 20) {
-        const parsed = parseOrderMatrixText(pastedText, undefined, sellerName);
-        if (parsed.items.length > 0) {
-          const newOrder = createOrderFromParsedMatrix(
-            parsed,
-            undefined,
-            'sample',
-            'Pedido Colado (Ctrl+V)'
-          );
-          OrderStore.addOrder(newOrder);
+        setPastedImageInfo('Dados do pedido colados (Ctrl+V)!');
+        setTimeout(() => setPastedImageInfo(null), 4000);
+        try {
+          const newOrder = await runOrderImportWithProgress({
+            pastedText,
+            userName: sellerName,
+            isAdmin,
+            selectedSellerForAdmin,
+            onProgress: setImportProgress,
+          });
           onOrderAdded(newOrder);
-          setPastedImageInfo('Dados do pedido colados (Ctrl+V) e importados!');
-          setTimeout(() => setPastedImageInfo(null), 4000);
+        } catch (err) {
+          console.error('Erro na importação de texto colado:', err);
+          setImportProgress((prev) => ({ ...prev, active: false }));
         }
       }
     };
 
     window.addEventListener('paste', handlePaste);
     return () => window.removeEventListener('paste', handlePaste);
-  }, [sellerName, selectedSellerForAdmin]);
-
-  // Function to process PDF or Image via backend parser
-  const processFile = async (file: File) => {
-    setIsUploading(true);
-    setUploadProgressMsg('Lendo arquivo do pedido...');
-
-    try {
-      const reader = new FileReader();
-      reader.onload = async () => {
-        const base64DataUrl = reader.result as string;
-        setUploadProgressMsg(
-          'Extraindo Cliente, SKU, Produto, Quantidade, Validade e Fornecedor...'
-        );
-
-        try {
-          const res = await fetch('/api/parse-order', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              fileDataUrl: base64DataUrl,
-              fileType: file.type.includes('pdf') ? 'pdf' : 'image',
-              fileName: file.name,
-              sellerName,
-            }),
-          });
-
-          const json = await res.json();
-
-          if (json.success && json.data) {
-            const newOrder = createOrderFromParsedMatrix(
-              json.data,
-              base64DataUrl,
-              file.type.includes('pdf') ? 'pdf' : 'image',
-              file.name
-            );
-            OrderStore.addOrder(newOrder);
-            onOrderAdded(newOrder);
-          }
-        } catch (err: any) {
-          console.error('Erro ao importar arquivo:', err);
-        } finally {
-          setIsUploading(false);
-        }
-      };
-
-      reader.readAsDataURL(file);
-    } catch (e) {
-      console.error(e);
-      setIsUploading(false);
-    }
-  };
+  }, [sellerName, selectedSellerForAdmin, isAdmin]);
 
   // Drag & drop handlers
   const handleDrag = (e: React.DragEvent) => {
@@ -319,6 +220,9 @@ export const SellerDashboard: React.FC<SellerDashboardProps> = ({
 
   return (
     <div className="space-y-6 pb-12">
+      {/* Global Percentage Progress Modal */}
+      <ImportProgressModal progress={importProgress} />
+
       {/* Seller / Admin Import Header Banner */}
       <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 border border-slate-800 rounded-2xl p-5 sm:p-6 text-white shadow-xl relative overflow-hidden">
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -333,7 +237,7 @@ export const SellerDashboard: React.FC<SellerDashboardProps> = ({
               Olá, {sellerName}!
             </h2>
             <p className="text-xs sm:text-sm text-slate-300 mt-1">
-              Importe seus pedidos em PDF ou foto e acompanhe a posição exata na fila do estoque.
+              Importe seus pedidos em PDF ou fotografia e acompanhe a posição exata na fila do estoque.
             </p>
           </div>
 
@@ -375,15 +279,20 @@ export const SellerDashboard: React.FC<SellerDashboardProps> = ({
             : 'border-slate-300 hover:border-slate-400'
         }`}
       >
-        {isUploading ? (
-          <div className="py-8 space-y-3">
-            <Loader2 className="w-10 h-10 text-emerald-600 animate-spin mx-auto" />
-            <p className="text-sm font-bold text-slate-800">
-              {uploadProgressMsg}
-            </p>
-            <p className="text-xs text-slate-500">
-              Extraindo Nome do Cliente, SKU, Produto, Quantidade, Validade e Fornecedor...
-            </p>
+        {importProgress.active ? (
+          <div className="py-6 max-w-md mx-auto space-y-3">
+            <div className="flex items-center justify-between text-xs font-black text-slate-800">
+              <span>{importProgress.stageText}</span>
+              <span className="text-emerald-600 font-mono text-base">
+                {Math.round(importProgress.percent)}%
+              </span>
+            </div>
+            <div className="w-full h-3.5 bg-slate-100 rounded-full overflow-hidden border border-slate-200">
+              <div
+                className="h-full bg-gradient-to-r from-blue-600 to-emerald-500 transition-all duration-200"
+                style={{ width: `${importProgress.percent}%` }}
+              />
+            </div>
           </div>
         ) : (
           <>
@@ -396,11 +305,11 @@ export const SellerDashboard: React.FC<SellerDashboardProps> = ({
                 Incluir Novo Pedido de Expedição
               </h3>
               <p className="text-xs text-slate-500 max-w-xl mx-auto mt-1">
-                Arraste um arquivo PDF ou Foto, cole com{' '}
+                Envie um arquivo <strong>PDF</strong>, selecione uma <strong>Fotografia</strong> da galeria, tire foto pela câmera ou cole com{' '}
                 <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">
                   Ctrl + V
                 </kbd>
-                , ou tire uma foto com a câmera.
+                .
               </p>
             </div>
 
@@ -427,13 +336,24 @@ export const SellerDashboard: React.FC<SellerDashboardProps> = ({
             )}
 
             {/* Action Buttons */}
-            <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
+            <div className="flex flex-wrap items-center justify-center gap-2.5 pt-2">
               <label className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold cursor-pointer shadow-md shadow-emerald-600/20 flex items-center gap-2 transition-all">
                 <Upload className="w-4 h-4" />
-                <span>Importar Arquivo / PDF / Foto</span>
+                <span>Importar PDF ou Arquivo</span>
                 <input
                   type="file"
                   accept="application/pdf,image/*"
+                  onChange={handleFileInputChange}
+                  className="hidden"
+                />
+              </label>
+
+              <label className="px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold cursor-pointer shadow-md shadow-blue-600/20 flex items-center gap-2 transition-all">
+                <ImageIcon className="w-4 h-4" />
+                <span>Importar por Fotografia (Galeria)</span>
+                <input
+                  type="file"
+                  accept="image/*"
                   onChange={handleFileInputChange}
                   className="hidden"
                 />
@@ -445,7 +365,7 @@ export const SellerDashboard: React.FC<SellerDashboardProps> = ({
                 className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold shadow-md flex items-center gap-2 transition-all"
               >
                 <Camera className="w-4 h-4 text-emerald-400" />
-                <span>Tirar Foto do Pedido</span>
+                <span>Tirar Foto com a Câmera</span>
               </button>
             </div>
           </>
@@ -473,7 +393,7 @@ export const SellerDashboard: React.FC<SellerDashboardProps> = ({
               Nenhum pedido encontrado
             </h4>
             <p className="text-xs text-slate-500 max-w-sm mx-auto">
-              Você ainda não enviou pedidos hoje. Importe um PDF ou foto do pedido para começar.
+              Você ainda não enviou pedidos hoje. Importe um PDF ou fotografia do pedido para começar.
             </p>
           </div>
         ) : (
@@ -651,14 +571,7 @@ export const SellerDashboard: React.FC<SellerDashboardProps> = ({
         <CameraCapture
           onCapture={(base64) => {
             setShowCamera(false);
-            fetch(base64)
-              .then((res) => res.blob())
-              .then((blob) => {
-                const file = new File([blob], 'foto_pedido.jpg', {
-                  type: 'image/jpeg',
-                });
-                processFile(file);
-              });
+            processCameraCapture(base64);
           }}
           onClose={() => setShowCamera(false)}
         />

@@ -254,7 +254,7 @@ export const CameraCapture: React.FC<CameraCaptureProps> = ({
                 className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-600/30"
               >
                 <Check className="w-4 h-4" />
-                <span>Processar Esta Foto com IA</span>
+                <span>Importar Esta Fotografia</span>
               </button>
             </>
           ) : !error ? (

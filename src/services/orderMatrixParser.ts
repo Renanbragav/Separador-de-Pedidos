@@ -386,6 +386,58 @@ export function parseOrderMatrixText(
     }
   }
 
+  // Secondary OCR pass for photographs where table borders or OCR noise altered line structure
+  if (items.length === 0 && lines.length > 0) {
+    for (let i = 0; i < lines.length; i++) {
+      const cleanedOcrLine = lines[i]
+        .replace(/^[|!lI\[\]•·\-_=+*~<>:;.,\s]+/, '')
+        .replace(/[|!\[\]]+/g, '  ')
+        .trim();
+      if (!cleanedOcrLine || cleanedOcrLine.length < 6) continue;
+
+      const retryItem = parseVitSisMatrixRow(cleanedOcrLine);
+      if (retryItem) {
+        items.push(retryItem);
+        continue;
+      }
+
+      // Loose photo line match: e.g. "SALTY CHIPS SOUR CREAM 40G - 16 UN" or "16x PRODUTO..."
+      const looseMatch =
+        cleanedOcrLine.match(
+          /^(\d{1,4})\s*(?:x|un|und|pt|cx|sch|pote|caixa)?\s+([A-ZÀ-Ú][A-ZÀ-Ú0-9\s.%-]{4,})$/i
+        ) ||
+        cleanedOcrLine.match(
+          /^([A-ZÀ-Ú][A-ZÀ-Ú0-9\s.%-]{4,})\s+(\d{1,4})\s*(?:un|und|pt|cx|sch)?$/i
+        );
+      if (
+        looseMatch &&
+        !/^(?:PEDIDO|CLIENTE|ENDERE|FANTASIA|VENDEDOR|TRANSP|CNPJ|DATA|TOTAL|PAGINA|ASSINATURA)/i.test(
+          cleanedOcrLine
+        )
+      ) {
+        const isQtyFirst = /^\d+$/.test(looseMatch[1].trim());
+        const qty = parseInt(
+          isQtyFirst ? looseMatch[1] : looseMatch[2],
+          10
+        ) || 1;
+        const desc = (isQtyFirst ? looseMatch[2] : looseMatch[1]).trim();
+        items.push({
+          code: String(1000 + items.length + 1),
+          quantityOrdered: qty,
+          unit: 'UN',
+          description: desc.toUpperCase(),
+          presentation: '',
+          manufacturer: 'PADRÃO',
+          expirationDate: extractExpirationDate(cleanedOcrLine) || '-',
+          unitPrice: 0,
+          totalPrice: 0,
+          location: '-',
+          lotInfo: '',
+        });
+      }
+    }
+  }
+
   // Calculate total value & total items
   const calculatedTotal = items.reduce(
     (acc, item) =>

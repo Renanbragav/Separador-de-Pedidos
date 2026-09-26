@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   PackageSearch,
   CheckSquare,
@@ -6,18 +6,37 @@ import {
   Calendar,
   Trash2,
   Upload,
-  FileSpreadsheet,
-  Loader2,
   UserCheck,
+  PieChart as PieChartIcon,
+  History,
+  RotateCcw,
+  HardDrive,
+  Layers,
+  Camera,
+  Image as ImageIcon,
 } from 'lucide-react';
-import { Order, OrderStatus, VENDEDORES } from '../types';
 import {
-  extractExpirationDate,
-  parseOrderMatrixText,
-  ParsedOrderMatrix,
-} from '../services/orderMatrixParser';
-import { SAMPLE_MATRIX_TEXT } from '../data/sampleOrder';
-import { OrderStore } from '../services/store';
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+  Tooltip,
+  Legend,
+} from 'recharts';
+import { Order, OrderStatus, VENDEDORES } from '../types';
+import { extractExpirationDate } from '../services/orderMatrixParser';
+import {
+  OrderStore,
+  getLocalDateKey,
+  getDateKeyDaysAgo,
+  MAX_RETENTION_DAYS,
+} from '../services/store';
+import { runOrderImportWithProgress } from '../services/orderImporter';
+import {
+  ImportProgressModal,
+  ImportProgressState,
+} from './ImportProgressModal';
+import { CameraCapture } from './CameraCapture';
 
 interface StockDashboardProps {
   stockUserName: string;
@@ -29,6 +48,16 @@ interface StockDashboardProps {
   onOrderAdded?: (newOrder: Order) => void;
 }
 
+function formatDateKeyLabel(dateKey: string, todayKey: string, yesterdayKey: string): string {
+  if (dateKey === 'ALL_30_DAYS') return 'Últimos 30 Dias (Geral)';
+  const parts = dateKey.split('-');
+  const formatted =
+    parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : dateKey;
+  if (dateKey === todayKey) return `Hoje (${formatted})`;
+  if (dateKey === yesterdayKey) return `Ontem (${formatted})`;
+  return formatted;
+}
+
 export const StockDashboard: React.FC<StockDashboardProps> = ({
   stockUserName,
   orders,
@@ -38,152 +67,199 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
   onDeleteOrder,
   onOrderAdded,
 }) => {
-  const [selectedStatus, setSelectedStatus] = useState<OrderStatus | 'Todos'>('Todos');
-  const [selectedDate, setSelectedDate] = useState<string>(
-    new Date().toISOString().split('T')[0]
+  const todayKey = useMemo(() => getLocalDateKey(), []);
+  const yesterdayKey = useMemo(() => getDateKeyDaysAgo(1), []);
+  const minAllowedDateKey = useMemo(
+    () => getDateKeyDaysAgo(MAX_RETENTION_DAYS),
+    []
   );
+
+  const [selectedStatus, setSelectedStatus] = useState<OrderStatus | 'Todos'>('Todos');
+  const [selectedDate, setSelectedDate] = useState<string>(todayKey);
   const [searchQuery, setSearchQuery] = useState('');
-  const [isUploading, setIsUploading] = useState(false);
+  const [importProgress, setImportProgress] = useState<ImportProgressState>({
+    active: false,
+    percent: 0,
+    stageText: '',
+    sourceType: 'pdf',
+  });
+  const [showCamera, setShowCamera] = useState(false);
   const [selectedSellerForAdmin, setSelectedSellerForAdmin] = useState<string>('Auto');
+  const [storageCleanedMsg, setStorageCleanedMsg] = useState<string | null>(null);
 
-  const createOrderFromParsedMatrix = (
-    parsed: ParsedOrderMatrix,
-    fileDataUrl?: string,
-    fileType?: 'pdf' | 'image' | 'sample',
-    fileName?: string
-  ): Order => {
-    let sellerDisplay = parsed.sellerName || stockUserName.toUpperCase();
-    let sellerNorm = stockUserName;
+  // Build daily archive summary for all saved days within the 30-day window
+  const savedDaysArchive = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        dateKey: string;
+        total: number;
+        pendente: number;
+        emSeparacao: number;
+        faturado: number;
+        totalValue: number;
+      }
+    >();
 
-    if (selectedSellerForAdmin !== 'Auto') {
-      sellerDisplay = selectedSellerForAdmin.toUpperCase();
-      sellerNorm = selectedSellerForAdmin;
-    } else if (parsed.sellerName) {
-      const matched = VENDEDORES.find((v) =>
-        parsed.sellerName.toLowerCase().includes(v.toLowerCase())
-      );
-      if (matched) {
-        sellerNorm = matched;
+    // Always include Today and Yesterday in quick history tabs
+    map.set(todayKey, {
+      dateKey: todayKey,
+      total: 0,
+      pendente: 0,
+      emSeparacao: 0,
+      faturado: 0,
+      totalValue: 0,
+    });
+    map.set(yesterdayKey, {
+      dateKey: yesterdayKey,
+      total: 0,
+      pendente: 0,
+      emSeparacao: 0,
+      faturado: 0,
+      totalValue: 0,
+    });
+
+    for (const o of orders) {
+      const dKey =
+        o.dateKey ||
+        (o.createdAt ? getLocalDateKey(new Date(o.createdAt)) : todayKey);
+      if (!map.has(dKey)) {
+        map.set(dKey, {
+          dateKey: dKey,
+          total: 0,
+          pendente: 0,
+          emSeparacao: 0,
+          faturado: 0,
+          totalValue: 0,
+        });
+      }
+      const entry = map.get(dKey)!;
+      entry.total += 1;
+      entry.totalValue += o.totalValue || 0;
+      if (o.status === 'Pendente' || o.status === 'Com Pendências') {
+        entry.pendente += 1;
+      } else if (o.status === 'Separando' || o.status === 'Conferido') {
+        entry.emSeparacao += 1;
+      } else if (o.status === 'Faturado') {
+        entry.faturado += 1;
       }
     }
 
-    return {
-      id: 'ped-' + Date.now(),
-      orderNumber:
-        parsed.orderNumber ||
-        String(Math.floor(160000 + Math.random() * 9000)),
-      dateCad: parsed.dateCad || new Date().toLocaleString('pt-BR'),
-      clientCode: parsed.clientCode || '',
-      clientName: parsed.clientName || 'Cliente Importado',
-      clientFantasia: parsed.clientFantasia || '',
-      clientAddress: parsed.clientAddress || '',
-      cnpj: parsed.cnpj || '',
-      transport: parsed.transport || 'TRANSRAPIDO LOGISTICA LTDA',
-      route: parsed.route || '1 - LOCAL',
-      sellerName: sellerDisplay,
-      sellerNormalized: sellerNorm,
-      status: 'Pendente',
-      totalItems: parsed.items?.length || 0,
-      totalValue: parsed.totalValue || 0,
-      fileDataUrl,
-      fileType,
-      fileName,
-      createdAt: Date.now(),
-      dateKey: new Date().toISOString().split('T')[0],
-      items: (parsed.items || []).map((it, idx) => {
-        const expDate =
-          it.expirationDate || extractExpirationDate(it.lotInfo) || '-';
-        return {
-          id: `item-${Date.now()}-${idx}`,
-          code: it.code || `SKU-${idx + 1}`,
-          description: it.description || 'Produto sem descrição',
-          presentation: it.presentation || '',
-          manufacturer: it.manufacturer || 'PADRÃO',
-          expirationDate: expDate,
-          quantityOrdered: Number(it.quantityOrdered) || 1,
-          quantitySeparated: Number(it.quantityOrdered) || 1,
-          unit: it.unit || 'UN',
-          unitPrice: Number(it.unitPrice) || 0,
-          totalPrice: Number(it.totalPrice) || 0,
-          location: it.location || '-',
-          lotInfo: it.lotInfo || (expDate !== '-' ? `L->${expDate}` : ''),
-          checked: false,
-        };
-      }),
-    };
-  };
+    return Array.from(map.values()).sort((a, b) =>
+      b.dateKey.localeCompare(a.dateKey)
+    );
+  }, [orders, todayKey, yesterdayKey]);
 
-  const handleAdminFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Orders for the currently selected day (or all 30 days)
+  const ordersForSelectedDay = useMemo(() => {
+    if (selectedDate === 'ALL_30_DAYS') {
+      return orders;
+    }
+    return orders.filter((o) => {
+      const dKey =
+        o.dateKey ||
+        (o.createdAt ? getLocalDateKey(new Date(o.createdAt)) : todayKey);
+      return dKey === selectedDate;
+    });
+  }, [orders, selectedDate, todayKey]);
+
+  // Recharts Pie Chart Data for "Resumo do Dia" (Pendente, Em separação, Faturado)
+  const pieChartStats = useMemo(() => {
+    const pendenteCount = ordersForSelectedDay.filter(
+      (o) => o.status === 'Pendente' || o.status === 'Com Pendências'
+    ).length;
+    const emSeparacaoCount = ordersForSelectedDay.filter(
+      (o) => o.status === 'Separando' || o.status === 'Conferido'
+    ).length;
+    const faturadoCount = ordersForSelectedDay.filter(
+      (o) => o.status === 'Faturado'
+    ).length;
+    const totalDayValue = ordersForSelectedDay.reduce(
+      (acc, o) => acc + (o.totalValue || 0),
+      0
+    );
+
+    const chartData = [
+      {
+        name: 'Pendente',
+        value: pendenteCount,
+        color: '#f59e0b', // amber-500
+      },
+      {
+        name: 'Em separação',
+        value: emSeparacaoCount,
+        color: '#3b82f6', // blue-500
+      },
+      {
+        name: 'Faturado',
+        value: faturadoCount,
+        color: '#10b981', // emerald-500
+      },
+    ];
+
+    return {
+      pendenteCount,
+      emSeparacaoCount,
+      faturadoCount,
+      totalCount: ordersForSelectedDay.length,
+      totalDayValue,
+      chartData,
+      activeSlices: chartData.filter((d) => d.value > 0),
+    };
+  }, [ordersForSelectedDay]);
+
+  const handleAdminFileUpload = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
     if (!e.target.files || !e.target.files[0]) return;
     const file = e.target.files[0];
     e.target.value = '';
-    setIsUploading(true);
 
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const base64DataUrl = reader.result as string;
-      try {
-        const res = await fetch('/api/parse-order', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            fileDataUrl: base64DataUrl,
-            fileType: file.type.includes('pdf') ? 'pdf' : 'image',
-            sellerName: stockUserName,
-          }),
-        });
-        const json = await res.json();
-        const parsed =
-          json.success && json.data
-            ? json.data
-            : parseOrderMatrixText(SAMPLE_MATRIX_TEXT, undefined, stockUserName);
-        const newOrder = createOrderFromParsedMatrix(
-          parsed,
-          base64DataUrl,
-          file.type.includes('pdf') ? 'pdf' : 'image',
-          file.name
-        );
-        OrderStore.addOrder(newOrder);
-        if (onOrderAdded) onOrderAdded(newOrder);
-      } catch (err) {
-        const fallbackParsed = parseOrderMatrixText(
-          SAMPLE_MATRIX_TEXT,
-          undefined,
-          stockUserName
-        );
-        const newOrder = createOrderFromParsedMatrix(
-          fallbackParsed,
-          base64DataUrl,
-          file.type.includes('pdf') ? 'pdf' : 'image',
-          file.name
-        );
-        OrderStore.addOrder(newOrder);
-        if (onOrderAdded) onOrderAdded(newOrder);
-      } finally {
-        setIsUploading(false);
-      }
-    };
-    reader.readAsDataURL(file);
+    try {
+      const newOrder = await runOrderImportWithProgress({
+        file,
+        userName: stockUserName,
+        isAdmin: true,
+        selectedSellerForAdmin,
+        onProgress: setImportProgress,
+      });
+      setSelectedDate(todayKey);
+      if (onOrderAdded) onOrderAdded(newOrder);
+    } catch (err) {
+      console.error('Erro ao importar arquivo:', err);
+      setImportProgress((prev) => ({ ...prev, active: false }));
+    }
   };
 
-  const handleAdminImportSample = () => {
-    const parsed = parseOrderMatrixText(
-      SAMPLE_MATRIX_TEXT,
-      undefined,
-      stockUserName
-    );
-    const sample = createOrderFromParsedMatrix(
-      parsed,
-      undefined,
-      'sample',
-      'pedido.pdf (Matriz #160753)'
-    );
-    OrderStore.addOrder(sample);
-    if (onOrderAdded) onOrderAdded(sample);
+  const handleAdminCameraCapture = async (base64DataUrl: string) => {
+    try {
+      const newOrder = await runOrderImportWithProgress({
+        cameraBase64: base64DataUrl,
+        userName: stockUserName,
+        isAdmin: true,
+        selectedSellerForAdmin,
+        onProgress: setImportProgress,
+      });
+      setSelectedDate(todayKey);
+      if (onOrderAdded) onOrderAdded(newOrder);
+    } catch (err) {
+      console.error('Erro ao importar fotografia:', err);
+      setImportProgress((prev) => ({ ...prev, active: false }));
+    }
   };
 
-  // Filter orders by status and search query (including SKU, Produto, Fornecedor, Validade, Cliente)
-  const filteredOrders = orders.filter((o) => {
+  const handleManualPruneCheck = () => {
+    const removed = OrderStore.cleanExpiredHistory();
+    setStorageCleanedMsg(
+      removed > 0
+        ? `${removed} pedido(s) com mais de 30 dias foram removidos para liberar espaço.`
+        : 'Espaço otimizado! Todos os pedidos salvos estão dentro do limite dos últimos 30 dias.'
+    );
+    setTimeout(() => setStorageCleanedMsg(null), 4000);
+  };
+
+  // Filter orders for the selected day by status and search query
+  const filteredOrders = ordersForSelectedDay.filter((o) => {
     if (selectedStatus !== 'Todos' && o.status !== selectedStatus) return false;
 
     if (searchQuery.trim()) {
@@ -224,12 +300,14 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
   };
 
   const statusCounts = {
-    Todos: orders.length,
-    Pendente: orders.filter((o) => o.status === 'Pendente').length,
-    Separando: orders.filter((o) => o.status === 'Separando').length,
-    Conferido: orders.filter((o) => o.status === 'Conferido').length,
-    'Com Pendências': orders.filter((o) => o.status === 'Com Pendências').length,
-    Faturado: orders.filter((o) => o.status === 'Faturado').length,
+    Todos: ordersForSelectedDay.length,
+    Pendente: ordersForSelectedDay.filter((o) => o.status === 'Pendente').length,
+    Separando: ordersForSelectedDay.filter((o) => o.status === 'Separando').length,
+    Conferido: ordersForSelectedDay.filter((o) => o.status === 'Conferido').length,
+    'Com Pendências': ordersForSelectedDay.filter(
+      (o) => o.status === 'Com Pendências'
+    ).length,
+    Faturado: ordersForSelectedDay.filter((o) => o.status === 'Faturado').length,
   };
 
   return (
@@ -239,28 +317,300 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
         <div>
           <div className="flex items-center gap-2 text-xs font-bold text-emerald-400 uppercase tracking-wider mb-1">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            Painel da Equipe do Estoque / Expedição • Matriz Padrão
+            Painel da Equipe do Estoque / Expedição • Arquivo de 30 Dias
           </div>
           <h2 className="text-xl sm:text-2xl font-black text-white">
             Operador: {stockUserName}
           </h2>
           <p className="text-xs sm:text-sm text-slate-300 mt-1">
-            Visualização completa com Nome do Cliente, SKU, Produto, Quantidade, Validade e Fornecedor extraídos da folha de pedido.
+            Todos os pedidos ficam salvos diariamente por <strong className="text-emerald-300">30 dias</strong> e podem ser reabertos a qualquer momento.
           </p>
         </div>
 
-        {/* Date Selector for Archives */}
-        <div className="flex items-center gap-2 bg-slate-800/90 p-2.5 rounded-xl border border-slate-700">
-          <Calendar className="w-4 h-4 text-emerald-400" />
-          <span className="text-xs text-slate-300 font-semibold">Dia Salvo:</span>
-          <input
-            type="date"
-            value={selectedDate}
-            onChange={(e) => setSelectedDate(e.target.value)}
-            className="bg-slate-900 border border-slate-700 text-white text-xs font-bold px-2 py-1 rounded-lg focus:outline-none focus:ring-1 focus:ring-emerald-500"
-          />
+        {/* Date Picker & 30-Day Retention Indicator */}
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-2 bg-slate-800/90 p-2.5 rounded-xl border border-slate-700">
+            <Calendar className="w-4 h-4 text-emerald-400" />
+            <span className="text-xs text-slate-300 font-semibold">
+              Consultar Dia:
+            </span>
+            <input
+              type="date"
+              min={minAllowedDateKey}
+              max={todayKey}
+              value={selectedDate === 'ALL_30_DAYS' ? todayKey : selectedDate}
+              onChange={(e) => {
+                if (e.target.value) setSelectedDate(e.target.value);
+              }}
+              className="bg-slate-900 border border-slate-700 text-white text-xs font-bold px-2 py-1 rounded-lg focus:outline-none focus:ring-1 focus:ring-emerald-500"
+            />
+          </div>
         </div>
       </div>
+
+      {/* RESUMO DO DIA & HISTÓRICO DE 30 DIAS (RECHARTS PIE CHART) */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+        {/* Left / Main Column: Resumo do Dia Pie Chart & Status Breakdown */}
+        <div className="lg:col-span-7 bg-white border border-slate-200 rounded-2xl p-5 shadow-sm flex flex-col justify-between space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <PieChartIcon className="w-5 h-5 text-emerald-600" />
+                <h3 className="text-base font-black text-slate-900">
+                  Resumo do Dia:{' '}
+                  <span className="text-emerald-700">
+                    {formatDateKeyLabel(selectedDate, todayKey, yesterdayKey)}
+                  </span>
+                </h3>
+              </div>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Distribuição de pedidos por status (Pendente, Em separação e Faturado)
+              </p>
+            </div>
+
+            <div className="text-right">
+              <span className="text-[10px] font-bold uppercase text-slate-400 block">
+                Total Movimentado
+              </span>
+              <span className="text-sm font-black text-emerald-700">
+                R${' '}
+                {pieChartStats.totalDayValue.toLocaleString('pt-BR', {
+                  minimumFractionDigits: 2,
+                })}
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-12 gap-4 items-center">
+            {/* Recharts PieChart */}
+            <div className="sm:col-span-6 h-56 w-full flex items-center justify-center">
+              {pieChartStats.totalCount === 0 ? (
+                <div className="text-center space-y-2 p-4">
+                  <div className="w-24 h-24 rounded-full border-8 border-slate-100 flex items-center justify-center mx-auto">
+                    <span className="text-xs font-bold text-slate-400">
+                      0 pedidos
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 font-medium">
+                    Nenhum pedido registrado nesta data.
+                  </p>
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={pieChartStats.activeSlices}
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={48}
+                      outerRadius={78}
+                      paddingAngle={4}
+                      dataKey="value"
+                      nameKey="name"
+                      stroke="#ffffff"
+                      strokeWidth={2}
+                    >
+                      {pieChartStats.activeSlices.map((entry, idx) => (
+                        <Cell key={`cell-${idx}`} fill={entry.color} />
+                      ))}
+                    </Pie>
+                    <Tooltip
+                      formatter={(value: any, name: any) => [
+                        `${value} pedido(s)`,
+                        name,
+                      ]}
+                      contentStyle={{
+                        borderRadius: '12px',
+                        border: '1px solid #e2e8f0',
+                        fontSize: '12px',
+                        fontWeight: 700,
+                      }}
+                    />
+                    <Legend
+                      verticalAlign="bottom"
+                      height={28}
+                      iconType="circle"
+                      wrapperStyle={{ fontSize: '12px', fontWeight: 700 }}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+
+            {/* 3 Core Status KPI Cards */}
+            <div className="sm:col-span-6 space-y-2.5">
+              {/* Pendente */}
+              <div className="p-3 rounded-xl bg-amber-50/80 border border-amber-200 flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <span className="w-3.5 h-3.5 rounded-full bg-amber-500 shrink-0" />
+                  <div>
+                    <p className="text-xs font-black text-amber-950">Pendente</p>
+                    <p className="text-[10px] text-amber-700">
+                      Aguardando início ou com pendência
+                    </p>
+                  </div>
+                </div>
+                <span className="text-lg font-black text-amber-900">
+                  {pieChartStats.pendenteCount}
+                </span>
+              </div>
+
+              {/* Em Separação */}
+              <div className="p-3 rounded-xl bg-blue-50/80 border border-blue-200 flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <span className="w-3.5 h-3.5 rounded-full bg-blue-500 shrink-0" />
+                  <div>
+                    <p className="text-xs font-black text-blue-950">
+                      Em separação
+                    </p>
+                    <p className="text-[10px] text-blue-700">
+                      Separando no estoque ou conferido
+                    </p>
+                  </div>
+                </div>
+                <span className="text-lg font-black text-blue-900">
+                  {pieChartStats.emSeparacaoCount}
+                </span>
+              </div>
+
+              {/* Faturado */}
+              <div className="p-3 rounded-xl bg-emerald-50/80 border border-emerald-200 flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <span className="w-3.5 h-3.5 rounded-full bg-emerald-500 shrink-0" />
+                  <div>
+                    <p className="text-xs font-black text-emerald-950">
+                      Faturado
+                    </p>
+                    <p className="text-[10px] text-emerald-700">
+                      Finalizado (pode ser reaberto)
+                    </p>
+                  </div>
+                </div>
+                <span className="text-lg font-black text-emerald-900">
+                  {pieChartStats.faturadoCount}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Right Column: Histórico dos Dias Anteriores (Últimos 30 Dias) */}
+        <div className="lg:col-span-5 bg-white border border-slate-200 rounded-2xl p-5 shadow-sm flex flex-col justify-between space-y-4">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <History className="w-5 h-5 text-blue-600" />
+                <h3 className="text-base font-black text-slate-900">
+                  Arquivo Diário (Últimos 30 Dias)
+                </h3>
+              </div>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Clique em qualquer dia anterior para visualizar e reabrir pedidos.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setSelectedDate('ALL_30_DAYS')}
+              className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold border transition-all flex items-center gap-1 ${
+                selectedDate === 'ALL_30_DAYS'
+                  ? 'bg-slate-900 text-white border-slate-900 shadow-sm'
+                  : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5" />
+              Ver Todos (30d)
+            </button>
+          </div>
+
+          {/* Scrollable List of Saved Days */}
+          <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+            {savedDaysArchive.map((day) => {
+              const isSelected = selectedDate === day.dateKey;
+              return (
+                <button
+                  key={day.dateKey}
+                  type="button"
+                  onClick={() => setSelectedDate(day.dateKey)}
+                  className={`w-full p-3 rounded-xl border text-left transition-all flex items-center justify-between gap-2 ${
+                    isSelected
+                      ? 'bg-slate-900 text-white border-slate-900 shadow-md'
+                      : 'bg-slate-50/80 hover:bg-slate-100 text-slate-800 border-slate-200'
+                  }`}
+                >
+                  <div>
+                    <p className="text-xs font-black flex items-center gap-1.5">
+                      <Calendar
+                        className={`w-3.5 h-3.5 ${
+                          isSelected ? 'text-emerald-400' : 'text-slate-500'
+                        }`}
+                      />
+                      {formatDateKeyLabel(day.dateKey, todayKey, yesterdayKey)}
+                    </p>
+                    <p
+                      className={`text-[11px] mt-0.5 ${
+                        isSelected ? 'text-slate-300' : 'text-slate-500'
+                      }`}
+                    >
+                      {day.total} pedido(s) • R${' '}
+                      {day.totalValue.toLocaleString('pt-BR', {
+                        minimumFractionDigits: 2,
+                      })}
+                    </p>
+                  </div>
+
+                  {/* Mini status pills */}
+                  <div className="flex items-center gap-1 text-[10px] font-bold">
+                    <span
+                      className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-600 border border-amber-500/30"
+                      title="Pendentes"
+                    >
+                      P: {day.pendente}
+                    </span>
+                    <span
+                      className="px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-600 border border-blue-500/30"
+                      title="Em Separação"
+                    >
+                      S: {day.emSeparacao}
+                    </span>
+                    <span
+                      className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-600 border border-emerald-500/30"
+                      title="Faturados"
+                    >
+                      F: {day.faturado}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* 30-day automatic cleanup footer */}
+          <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2 text-[11px] text-slate-500">
+            <div className="flex items-center gap-1.5">
+              <HardDrive className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+              <span>
+                Retenção automática de <strong>30 dias</strong> (anteriores são apagados)
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={handleManualPruneCheck}
+              className="text-emerald-700 hover:underline font-bold shrink-0"
+            >
+              Verificar Espaço
+            </button>
+          </div>
+          {storageCleanedMsg && (
+            <div className="text-[11px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
+              {storageCleanedMsg}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Global Percentage Progress Modal */}
+      <ImportProgressModal progress={importProgress} />
 
       {/* Quick Order Import Bar for Administrators */}
       {isAdmin && (
@@ -271,14 +621,24 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
               Importar Pedido Diretamente (Administrador {stockUserName})
             </h3>
             <p className="text-xs text-slate-500">
-              Importe o PDF ou foto da folha de pedido para replicar automaticamente Cliente, Quantidade, Produto, SKU, Validade e Fornecedor.
+              Importe o PDF, fotografia da galeria ou câmera para extrair Cliente, Quantidade, Produto, SKU, Validade e Fornecedor.
             </p>
           </div>
 
-          {isUploading ? (
-            <div className="flex items-center gap-2 text-xs font-bold text-purple-700">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              <span>Importando dados da matriz do pedido...</span>
+          {importProgress.active ? (
+            <div className="w-full lg:w-80 space-y-1.5">
+              <div className="flex items-center justify-between text-xs font-black text-purple-900">
+                <span className="truncate pr-2">{importProgress.stageText}</span>
+                <span className="font-mono text-purple-700">
+                  {Math.round(importProgress.percent)}%
+                </span>
+              </div>
+              <div className="w-full h-3 bg-purple-100 rounded-full overflow-hidden border border-purple-200">
+                <div
+                  className="h-full bg-purple-600 transition-all duration-200"
+                  style={{ width: `${importProgress.percent}%` }}
+                />
+              </div>
             </div>
           ) : (
             <div className="flex flex-wrap items-center gap-2">
@@ -290,7 +650,7 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
                   onChange={(e) => setSelectedSellerForAdmin(e.target.value)}
                   className="bg-white border border-purple-300 rounded px-1.5 py-0.5 text-xs font-bold text-slate-900 focus:outline-none"
                 >
-                  <option value="Auto">Da Matriz (Auto)</option>
+                  <option value="Auto">Do Pedido (Auto)</option>
                   {VENDEDORES.map((v) => (
                     <option key={v} value={v}>
                       {v}
@@ -301,7 +661,7 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
 
               <label className="px-3.5 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-bold cursor-pointer shadow-sm flex items-center gap-1.5 transition-all">
                 <Upload className="w-4 h-4" />
-                <span>Importar PDF / Foto</span>
+                <span>Importar PDF</span>
                 <input
                   type="file"
                   accept="application/pdf,image/*"
@@ -309,6 +669,26 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
                   className="hidden"
                 />
               </label>
+
+              <label className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold cursor-pointer shadow-sm flex items-center gap-1.5 transition-all">
+                <ImageIcon className="w-4 h-4" />
+                <span>Importar Fotografia</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handleAdminFileUpload}
+                  className="hidden"
+                />
+              </label>
+
+              <button
+                type="button"
+                onClick={() => setShowCamera(true)}
+                className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 transition-all"
+              >
+                <Camera className="w-4 h-4 text-emerald-400" />
+                <span>Tirar Foto</span>
+              </button>
             </div>
           )}
         </div>
@@ -367,15 +747,15 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
         </div>
       </div>
 
-      {/* Orders Dispatch Queue */}
+      {/* Orders Dispatch Queue for Selected Day */}
       <div className="space-y-4">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
             <PackageSearch className="w-5 h-5 text-emerald-600" />
-            Fila de Expedição ({sortedOrders.length} pedido(s))
+            Pedidos de {formatDateKeyLabel(selectedDate, todayKey, yesterdayKey)} ({sortedOrders.length})
           </h3>
           <span className="text-xs font-medium text-slate-500">
-            Ordenado por ordem de chegada
+            Clique em qualquer pedido salvo para reabrir, conferir ou alterar o status
           </span>
         </div>
 
@@ -383,10 +763,10 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
           <div className="bg-white border border-slate-200 rounded-2xl p-10 text-center space-y-3">
             <PackageSearch className="w-12 h-12 text-slate-300 mx-auto" />
             <h4 className="text-sm font-bold text-slate-700">
-              Nenhum pedido nesta categoria ou busca
+              Nenhum pedido encontrado para {formatDateKeyLabel(selectedDate, todayKey, yesterdayKey)}
             </h4>
             <p className="text-xs text-slate-500 max-w-sm mx-auto">
-              Alterne as abas ou limpe o campo de busca para visualizar os demais pedidos.
+              Selecione outro dia no Arquivo Diário de 30 Dias acima ou alterne o filtro de status.
             </p>
           </div>
         ) : (
@@ -421,6 +801,9 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
                             )}`}
                           >
                             {order.status}
+                          </span>
+                          <span className="text-[11px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded font-semibold">
+                            Data: {order.dateKey || todayKey}
                           </span>
                         </div>
                         <p className="text-sm font-black text-slate-900 mt-1">
@@ -513,7 +896,7 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
                     </div>
                   )}
 
-                  {/* Bottom Separation Progress & Open Button */}
+                  {/* Bottom Separation Progress & Reopen / Open Buttons */}
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
                     <div className="flex items-center gap-3">
                       <div className="w-32 bg-slate-200 h-2 rounded-full overflow-hidden">
@@ -527,14 +910,30 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
                       </span>
                     </div>
 
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {order.status === 'Faturado' && (
+                        <button
+                          type="button"
+                          onClick={() => onUpdateStatus(order.id, 'Separando')}
+                          className="px-3 py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all"
+                          title="Reabrir este pedido para nova conferência ou separação"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          <span>Reabrir Pedido</span>
+                        </button>
+                      )}
+
                       <button
                         type="button"
                         onClick={() => onOpenOrder(order)}
                         className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-md shadow-emerald-600/20 transition-all"
                       >
                         <CheckSquare className="w-4 h-4" />
-                        <span>Abrir e Separar Pedido (Checklist & Assinatura)</span>
+                        <span>
+                          {order.status === 'Faturado'
+                            ? 'Reabrir / Ver Checklist Completo'
+                            : 'Abrir e Separar Pedido (Checklist & Assinatura)'}
+                        </span>
                       </button>
 
                       {isAdmin && onDeleteOrder && (
@@ -558,6 +957,16 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
           </div>
         )}
       </div>
+      {/* Camera Modal for Admin */}
+      {showCamera && (
+        <CameraCapture
+          onCapture={(base64) => {
+            setShowCamera(false);
+            handleAdminCameraCapture(base64);
+          }}
+          onClose={() => setShowCamera(false)}
+        />
+      )}
     </div>
   );
 };
