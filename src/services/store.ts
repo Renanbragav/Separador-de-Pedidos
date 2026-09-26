@@ -88,12 +88,6 @@ function getInitialOrders(): Order[] {
   // Pre-populate with orders for Today and Previous Days so history is immediately available
   const initial: Order[] = [
     {
-      ...SAMPLE_ORDER_160753,
-      id: 'pedido-160753',
-      createdAt: Date.now() - 3600000 * 2,
-      dateKey: todayKey,
-    },
-    {
       id: 'pedido-160750',
       orderNumber: '160750',
       dateCad: 'Hoje - 15:30:00',

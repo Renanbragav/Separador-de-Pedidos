@@ -73,7 +73,8 @@ export interface Order {
   items: OrderItem[];
   totalItems: number;
   totalValue: number;
-  fileDataUrl?: string; // image or pdf base64 preview
+  fileDataUrl?: string; // image or pdf base64 preview (primary / page 1)
+  fileDataUrls?: string[]; // multiple page images (Ctrl+V / photos of multi-page orders)
   fileType?: 'image' | 'pdf' | 'sample';
   fileName?: string;
   createdAt: number; // timestamp for queue order

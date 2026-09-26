@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   PackageSearch,
   CheckSquare,
@@ -14,6 +14,10 @@ import {
   Layers,
   Camera,
   Image as ImageIcon,
+  Plus,
+  X,
+  Check,
+  Clipboard,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -31,7 +35,11 @@ import {
   getDateKeyDaysAgo,
   MAX_RETENTION_DAYS,
 } from '../services/store';
-import { runOrderImportWithProgress } from '../services/orderImporter';
+import {
+  runOrderImportWithProgress,
+  readFileAsDataUrl,
+  compressImageDataUrl,
+} from '../services/orderImporter';
 import {
   ImportProgressModal,
   ImportProgressState,
@@ -86,6 +94,8 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
   const [showCamera, setShowCamera] = useState(false);
   const [selectedSellerForAdmin, setSelectedSellerForAdmin] = useState<string>('Auto');
   const [storageCleanedMsg, setStorageCleanedMsg] = useState<string | null>(null);
+  const [stagedImages, setStagedImages] = useState<string[]>([]);
+  const [pastedInfoMsg, setPastedInfoMsg] = useState<string | null>(null);
 
   // Build daily archive summary for all saved days within the 30-day window
   const savedDaysArchive = useMemo(() => {
@@ -208,44 +218,120 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
     };
   }, [ordersForSelectedDay]);
 
+  const addAdminImageFilesToStage = async (files: File[]) => {
+    const newUrls: string[] = [];
+    for (const f of files) {
+      try {
+        const raw = await readFileAsDataUrl(f);
+        newUrls.push(raw);
+      } catch (err) {
+        console.error('Erro ao ler imagem:', err);
+      }
+    }
+    if (newUrls.length > 0) {
+      setStagedImages((prev) => [...prev, ...newUrls]);
+    }
+  };
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    const handlePaste = async (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (!e.clipboardData || !e.clipboardData.items) return;
+
+      const pastedFiles: File[] = [];
+      for (let i = 0; i < e.clipboardData.items.length; i++) {
+        const item = e.clipboardData.items[i];
+        if (item.type.indexOf('image') !== -1) {
+          const f = item.getAsFile();
+          if (f) pastedFiles.push(f);
+        }
+      }
+
+      if (pastedFiles.length > 0) {
+        e.preventDefault();
+        await addAdminImageFilesToStage(pastedFiles);
+        setPastedInfoMsg(
+          'Foto colada (Ctrl+V)! A imagem está visível abaixo — cole mais páginas se desejar ou clique em "Processar e Importar Pedido".'
+        );
+        setTimeout(() => setPastedInfoMsg(null), 5000);
+      }
+    };
+
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, [isAdmin]);
+
   const handleAdminFileUpload = async (
     e: React.ChangeEvent<HTMLInputElement>
   ) => {
-    if (!e.target.files || !e.target.files[0]) return;
-    const file = e.target.files[0];
+    if (!e.target.files || e.target.files.length === 0) return;
+    const files: File[] = Array.from(e.target.files);
     e.target.value = '';
 
+    const pdfFile = files.find(
+      (f: File) => f.type.includes('pdf') || f.name.toLowerCase().endsWith('.pdf')
+    );
+
+    if (pdfFile && stagedImages.length === 0) {
+      try {
+        const newOrder = await runOrderImportWithProgress({
+          file: pdfFile,
+          userName: stockUserName,
+          isAdmin: true,
+          selectedSellerForAdmin,
+          onProgress: setImportProgress,
+        });
+        setSelectedDate(todayKey);
+        if (onOrderAdded) onOrderAdded(newOrder);
+      } catch (err) {
+        console.error('Erro ao importar PDF:', err);
+        setImportProgress((prev) => ({ ...prev, active: false }));
+      }
+      return;
+    }
+
+    const imageFiles = files.filter(
+      (f: File) =>
+        f.type.startsWith('image/') ||
+        /\.(jpg|jpeg|png|webp|bmp)$/i.test(f.name)
+    );
+    if (imageFiles.length > 0) {
+      await addAdminImageFilesToStage(imageFiles);
+    }
+  };
+
+  const handleAdminImportStagedImages = async () => {
+    if (stagedImages.length === 0) return;
     try {
+      const pages = [...stagedImages];
       const newOrder = await runOrderImportWithProgress({
-        file,
+        imageDataUrls: pages,
         userName: stockUserName,
         isAdmin: true,
         selectedSellerForAdmin,
         onProgress: setImportProgress,
       });
+      setStagedImages([]);
       setSelectedDate(todayKey);
       if (onOrderAdded) onOrderAdded(newOrder);
     } catch (err) {
-      console.error('Erro ao importar arquivo:', err);
+      console.error('Erro ao importar fotografias:', err);
       setImportProgress((prev) => ({ ...prev, active: false }));
     }
   };
 
   const handleAdminCameraCapture = async (base64DataUrl: string) => {
-    try {
-      const newOrder = await runOrderImportWithProgress({
-        cameraBase64: base64DataUrl,
-        userName: stockUserName,
-        isAdmin: true,
-        selectedSellerForAdmin,
-        onProgress: setImportProgress,
-      });
-      setSelectedDate(todayKey);
-      if (onOrderAdded) onOrderAdded(newOrder);
-    } catch (err) {
-      console.error('Erro ao importar fotografia:', err);
-      setImportProgress((prev) => ({ ...prev, active: false }));
-    }
+    const compressed = await compressImageDataUrl(base64DataUrl, 1400);
+    setStagedImages((prev) => [...prev, compressed]);
   };
 
   const handleManualPruneCheck = () => {
@@ -614,81 +700,169 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
 
       {/* Quick Order Import Bar for Administrators */}
       {isAdmin && (
-        <div className="bg-white border-2 border-dashed border-purple-300 rounded-2xl p-4 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="space-y-0.5">
-            <h3 className="text-sm font-black text-slate-900 flex items-center gap-2">
-              <Upload className="w-4 h-4 text-purple-600" />
-              Importar Pedido Diretamente (Administrador {stockUserName})
-            </h3>
-            <p className="text-xs text-slate-500">
-              Importe o PDF, fotografia da galeria ou câmera para extrair Cliente, Quantidade, Produto, SKU, Validade e Fornecedor.
-            </p>
+        <div className="bg-white border-2 border-dashed border-purple-300 rounded-2xl p-4 shadow-sm space-y-4">
+          {pastedInfoMsg && (
+            <div className="bg-emerald-600 text-white px-3.5 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2">
+              <Clipboard className="w-4 h-4 shrink-0" />
+              <span>{pastedInfoMsg}</span>
+            </div>
+          )}
+
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="space-y-0.5">
+              <h3 className="text-sm font-black text-slate-900 flex items-center gap-2">
+                <Upload className="w-4 h-4 text-purple-600" />
+                Importar Pedido Diretamente (Administrador {stockUserName})
+              </h3>
+              <p className="text-xs text-slate-500">
+                Cole uma ou mais fotos com <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono font-bold">Ctrl + V</kbd> (múltiplas páginas), selecione da galeria ou envie PDF.
+              </p>
+            </div>
+
+            {importProgress.active ? (
+              <div className="w-full lg:w-80 space-y-1.5">
+                <div className="flex items-center justify-between text-xs font-black text-purple-900">
+                  <span className="truncate pr-2">{importProgress.stageText}</span>
+                  <span className="font-mono text-purple-700">
+                    {Math.round(importProgress.percent)}%
+                  </span>
+                </div>
+                <div className="w-full h-3 bg-purple-100 rounded-full overflow-hidden border border-purple-200">
+                  <div
+                    className="h-full bg-purple-600 transition-all duration-200"
+                    style={{ width: `${importProgress.percent}%` }}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-1.5 bg-purple-50 border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs">
+                  <UserCheck className="w-3.5 h-3.5 text-purple-600" />
+                  <span className="font-bold text-purple-900">Vendedor:</span>
+                  <select
+                    value={selectedSellerForAdmin}
+                    onChange={(e) => setSelectedSellerForAdmin(e.target.value)}
+                    className="bg-white border border-purple-300 rounded px-1.5 py-0.5 text-xs font-bold text-slate-900 focus:outline-none"
+                  >
+                    <option value="Auto">Do Pedido (Auto)</option>
+                    {VENDEDORES.map((v) => (
+                      <option key={v} value={v}>
+                        {v}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <label className="px-3.5 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-bold cursor-pointer shadow-sm flex items-center gap-1.5 transition-all">
+                  <Upload className="w-4 h-4" />
+                  <span>Importar PDF</span>
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    onChange={handleAdminFileUpload}
+                    className="hidden"
+                  />
+                </label>
+
+                <label className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold cursor-pointer shadow-sm flex items-center gap-1.5 transition-all">
+                  <ImageIcon className="w-4 h-4" />
+                  <span>Selecionar Fotografia(s)</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={handleAdminFileUpload}
+                    className="hidden"
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  onClick={() => setShowCamera(true)}
+                  className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 transition-all"
+                >
+                  <Camera className="w-4 h-4 text-emerald-400" />
+                  <span>Tirar Foto</span>
+                </button>
+              </div>
+            )}
           </div>
 
-          {importProgress.active ? (
-            <div className="w-full lg:w-80 space-y-1.5">
-              <div className="flex items-center justify-between text-xs font-black text-purple-900">
-                <span className="truncate pr-2">{importProgress.stageText}</span>
-                <span className="font-mono text-purple-700">
-                  {Math.round(importProgress.percent)}%
-                </span>
-              </div>
-              <div className="w-full h-3 bg-purple-100 rounded-full overflow-hidden border border-purple-200">
-                <div
-                  className="h-full bg-purple-600 transition-all duration-200"
-                  style={{ width: `${importProgress.percent}%` }}
-                />
-              </div>
-            </div>
-          ) : (
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="flex items-center gap-1.5 bg-purple-50 border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs">
-                <UserCheck className="w-3.5 h-3.5 text-purple-600" />
-                <span className="font-bold text-purple-900">Vendedor:</span>
-                <select
-                  value={selectedSellerForAdmin}
-                  onChange={(e) => setSelectedSellerForAdmin(e.target.value)}
-                  className="bg-white border border-purple-300 rounded px-1.5 py-0.5 text-xs font-bold text-slate-900 focus:outline-none"
+          {/* Multi-Page Staged Images Preview Gallery for Admin */}
+          {stagedImages.length > 0 && !importProgress.active && (
+            <div className="bg-slate-900 text-white rounded-xl p-4 space-y-3 border border-slate-800">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2">
+                <div>
+                  <h4 className="text-xs font-black text-emerald-400 uppercase">
+                    {stagedImages.length} Página(s) / Fotografia(s) Pronta(s) para Importar
+                  </h4>
+                  <p className="text-[11px] text-slate-400">
+                    Cole mais imagens com Ctrl + V se o pedido tiver mais páginas, ou clique em "Processar e Importar Pedido".
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setStagedImages([])}
+                  className="text-xs text-rose-400 hover:text-rose-300 font-bold"
                 >
-                  <option value="Auto">Do Pedido (Auto)</option>
-                  {VENDEDORES.map((v) => (
-                    <option key={v} value={v}>
-                      {v}
-                    </option>
-                  ))}
-                </select>
+                  Limpar Todas
+                </button>
               </div>
 
-              <label className="px-3.5 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-bold cursor-pointer shadow-sm flex items-center gap-1.5 transition-all">
-                <Upload className="w-4 h-4" />
-                <span>Importar PDF</span>
-                <input
-                  type="file"
-                  accept="application/pdf,image/*"
-                  onChange={handleAdminFileUpload}
-                  className="hidden"
-                />
-              </label>
+              <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2.5">
+                {stagedImages.map((imgUrl, idx) => (
+                  <div
+                    key={idx}
+                    className="bg-slate-950 border border-slate-700 rounded-lg overflow-hidden"
+                  >
+                    <div className="bg-slate-800 px-2 py-1 flex items-center justify-between text-[10px] font-bold text-emerald-300">
+                      <span>Página {idx + 1}</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setStagedImages((prev) =>
+                            prev.filter((_, i) => i !== idx)
+                          )
+                        }
+                        className="text-slate-400 hover:text-rose-400"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                    <img
+                      src={imgUrl}
+                      alt={`Página ${idx + 1}`}
+                      className="h-28 w-full object-contain bg-slate-950"
+                    />
+                  </div>
+                ))}
 
-              <label className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold cursor-pointer shadow-sm flex items-center gap-1.5 transition-all">
-                <ImageIcon className="w-4 h-4" />
-                <span>Importar Fotografia</span>
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={handleAdminFileUpload}
-                  className="hidden"
-                />
-              </label>
+                <label className="border border-dashed border-slate-700 hover:border-emerald-400 rounded-lg min-h-[120px] flex flex-col items-center justify-center gap-1 p-2 cursor-pointer text-slate-400 hover:text-emerald-300 text-center">
+                  <Plus className="w-5 h-5 text-emerald-400" />
+                  <span className="text-[11px] font-bold">+ Mais Páginas</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={handleAdminFileUpload}
+                    className="hidden"
+                  />
+                </label>
+              </div>
 
-              <button
-                type="button"
-                onClick={() => setShowCamera(true)}
-                className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 transition-all"
-              >
-                <Camera className="w-4 h-4 text-emerald-400" />
-                <span>Tirar Foto</span>
-              </button>
+              <div className="flex justify-end pt-1">
+                <button
+                  type="button"
+                  onClick={handleAdminImportStagedImages}
+                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black flex items-center gap-1.5 shadow-lg"
+                >
+                  <Check className="w-4 h-4" />
+                  <span>
+                    Processar e Importar Pedido ({stagedImages.length} página
+                    {stagedImages.length > 1 ? 's' : ''})
+                  </span>
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -844,15 +1018,16 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
                     </div>
                   </div>
 
-                  {/* Matrix Items Summary Table (SKU | Produto | Quantidade | Validade | Fornecedor) */}
+                  {/* Matrix Items Summary Table (Cdgo | Produto/Local | Qtde | Validade | Fornecedor | Total) */}
                   {order.items && order.items.length > 0 && (
                     <div className="border border-slate-200 rounded-xl overflow-hidden">
                       <div className="bg-slate-900 text-white text-[11px] font-bold grid grid-cols-12 px-3 py-2">
-                        <div className="col-span-2 sm:col-span-1">SKU</div>
-                        <div className="col-span-4 sm:col-span-5">Produto</div>
-                        <div className="col-span-2 text-center">Quantidade</div>
+                        <div className="col-span-1">Cdgo</div>
+                        <div className="col-span-4">Produto / Local</div>
+                        <div className="col-span-2 text-center">Qtde</div>
                         <div className="col-span-2 text-center">Validade</div>
                         <div className="col-span-2">Fornecedor</div>
+                        <div className="col-span-1 text-right">Total</div>
                       </div>
                       <div className="divide-y divide-slate-100 max-h-48 overflow-y-auto bg-white">
                         {order.items.map((item) => {
@@ -860,6 +1035,9 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
                             item.expirationDate ||
                             extractExpirationDate(item.lotInfo) ||
                             '-';
+                          const itemTotal =
+                            Number(item.totalPrice) ||
+                            (Number(item.unitPrice) || 0) * item.quantityOrdered;
                           return (
                             <div
                               key={item.id}
@@ -867,11 +1045,18 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
                                 item.checked ? 'bg-emerald-50/50' : 'hover:bg-slate-50'
                               }`}
                             >
-                              <div className="col-span-2 sm:col-span-1 font-mono font-bold text-slate-900">
+                              <div className="col-span-1 font-mono font-bold text-slate-900">
                                 {item.code}
                               </div>
-                              <div className="col-span-4 sm:col-span-5 font-semibold text-slate-800 pr-2 truncate">
-                                {item.description}
+                              <div className="col-span-4 pr-2">
+                                <span className="font-semibold text-slate-800 block truncate">
+                                  {item.description}
+                                </span>
+                                {item.location && item.location !== '-' && (
+                                  <span className="text-[10px] text-slate-500 font-medium">
+                                    Local: {item.location}
+                                  </span>
+                                )}
                               </div>
                               <div className="col-span-2 text-center font-black text-emerald-700">
                                 {item.quantityOrdered}{' '}
@@ -888,6 +1073,13 @@ export const StockDashboard: React.FC<StockDashboardProps> = ({
                                 <span className="inline-block px-2 py-0.5 rounded bg-blue-50 text-blue-800 border border-blue-200 text-[10px] font-bold uppercase truncate max-w-full">
                                   {item.manufacturer || '-'}
                                 </span>
+                              </div>
+                              <div className="col-span-1 text-right font-mono font-bold text-slate-800 text-[11px]">
+                                {itemTotal > 0
+                                  ? itemTotal.toLocaleString('pt-BR', {
+                                      minimumFractionDigits: 2,
+                                    })
+                                  : '-'}
                               </div>
                             </div>
                           );

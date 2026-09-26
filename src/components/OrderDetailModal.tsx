@@ -65,7 +65,16 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
   const [signatureBase64, setSignatureBase64] = useState(
     order.signatureBase64 || ''
   );
-  const [showImagePreview, setShowImagePreview] = useState(false);
+  const pageImages =
+    order.fileDataUrls && order.fileDataUrls.length > 0
+      ? order.fileDataUrls
+      : order.fileDataUrl && order.fileType !== 'pdf'
+      ? [order.fileDataUrl]
+      : [];
+  const [showImagePreview, setShowImagePreview] = useState(
+    pageImages.length > 0
+  );
+  const [activePageIndex, setActivePageIndex] = useState(0);
   const [isSaved, setIsSaved] = useState(false);
 
   // Quick Add Item row state
@@ -348,11 +357,17 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
           </div>
 
           {/* File attachment preview button if present */}
-          {order.fileDataUrl && (
-            <div className="bg-slate-100 rounded-xl p-3 border border-slate-200 flex items-center justify-between">
+          {(order.fileDataUrl || pageImages.length > 0) && (
+            <div className="bg-slate-100 rounded-xl p-3 border border-slate-200 flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-xs font-medium text-slate-700">
                 <FileText className="w-4 h-4 text-emerald-600" />
-                <span>Folha de Pedido Importada Original ({order.fileName || 'Arquivo'})</span>
+                <span>
+                  Folha / Fotografias do Pedido Original (
+                  {pageImages.length > 0
+                    ? `${pageImages.length} página(s)`
+                    : order.fileName || 'Arquivo'}
+                  )
+                </span>
               </div>
               <button
                 type="button"
@@ -360,26 +375,56 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                 className="text-xs text-emerald-700 hover:text-emerald-800 font-bold flex items-center gap-1 bg-white px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50"
               >
                 <FileSearch className="w-3.5 h-3.5" />
-                {showImagePreview ? 'Ocultar Arquivo' : 'Ver Folha de Pedido Original'}
+                {showImagePreview
+                  ? 'Ocultar Páginas do Pedido'
+                  : `Ver Páginas do Pedido (${pageImages.length || 1})`}
               </button>
             </div>
           )}
 
-          {showImagePreview && order.fileDataUrl && (
-            <div className="p-3 bg-slate-900 rounded-xl border border-slate-800 text-center">
-              {order.fileType === 'pdf' ? (
+          {showImagePreview && (order.fileDataUrl || pageImages.length > 0) && (
+            <div className="p-4 bg-slate-900 rounded-xl border border-slate-800 space-y-3">
+              {order.fileType === 'pdf' && order.fileDataUrl ? (
                 <iframe
                   src={order.fileDataUrl}
                   className="w-full h-96 rounded-lg border border-slate-700"
                   title="PDF do pedido"
                 />
-              ) : (
-                <img
-                  src={order.fileDataUrl}
-                  alt="Comprovante de Pedido"
-                  className="max-h-96 mx-auto rounded-lg object-contain border border-slate-700"
-                />
-              )}
+              ) : pageImages.length > 0 ? (
+                <>
+                  {pageImages.length > 1 && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
+                      <span className="text-xs font-bold text-emerald-400">
+                        Visualizando Página {activePageIndex + 1} de{' '}
+                        {pageImages.length}
+                      </span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {pageImages.map((_, idx) => (
+                          <button
+                            key={idx}
+                            type="button"
+                            onClick={() => setActivePageIndex(idx)}
+                            className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                              activePageIndex === idx
+                                ? 'bg-emerald-600 text-white shadow'
+                                : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                            }`}
+                          >
+                            Página {idx + 1}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <div className="text-center">
+                    <img
+                      src={pageImages[activePageIndex] || pageImages[0]}
+                      alt={`Página ${activePageIndex + 1} do Pedido`}
+                      className="max-h-96 mx-auto rounded-lg object-contain border border-slate-700"
+                    />
+                  </div>
+                </>
+              ) : null}
             </div>
           )}
 
@@ -396,7 +441,25 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                 </p>
               </div>
 
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                {items.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const allChecked = items.every((i) => i.checked);
+                      setItems((prev) =>
+                        prev.map((i) => ({ ...i, checked: !allChecked }))
+                      );
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center gap-1.5"
+                  >
+                    <CheckSquare className="w-3.5 h-3.5 text-emerald-400" />
+                    {items.every((i) => i.checked)
+                      ? 'Desmarcar Todos'
+                      : 'Dar Check em Todos'}
+                  </button>
+                )}
+
                 <button
                   type="button"
                   onClick={() => setShowAddRow(!showAddRow)}
@@ -430,10 +493,10 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
             {showAddRow && (
               <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 grid grid-cols-1 sm:grid-cols-6 gap-2 items-end">
                 <div>
-                  <label className="text-[10px] font-bold text-slate-600 uppercase">SKU</label>
+                  <label className="text-[10px] font-bold text-slate-600 uppercase">SKU / Cdgo</label>
                   <input
                     type="text"
-                    placeholder="Ex: 9357"
+                    placeholder="Ex: 2188"
                     value={newSku}
                     onChange={(e) => setNewSku(e.target.value)}
                     className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded bg-white"
@@ -443,7 +506,7 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                   <label className="text-[10px] font-bold text-slate-600 uppercase">Produto</label>
                   <input
                     type="text"
-                    placeholder="Nome do produto"
+                    placeholder="Ex: IM CREATINA 300G"
                     value={newProd}
                     onChange={(e) => setNewProd(e.target.value)}
                     className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded bg-white"
@@ -474,7 +537,7 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                     <label className="text-[10px] font-bold text-slate-600 uppercase">Fornecedor</label>
                     <input
                       type="text"
-                      placeholder="Ex: BENDU"
+                      placeholder="Ex: INTEGRALMEDICA"
                       value={newFornecedor}
                       onChange={(e) => setNewFornecedor(e.target.value)}
                       className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded bg-white"
@@ -493,14 +556,15 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
 
             {/* Matrix Table Header & Rows */}
             <div className="border border-slate-200 rounded-xl overflow-hidden divide-y divide-slate-200 bg-white shadow-sm">
-              <div className="bg-slate-900 text-white text-xs font-bold grid grid-cols-12 px-3 py-2.5 text-left items-center">
-                <div className="col-span-1 text-center">OK</div>
-                <div className="col-span-2 sm:col-span-1">SKU</div>
-                <div className="col-span-4">Produto</div>
-                <div className="col-span-2">Fornecedor</div>
-                <div className="col-span-2 text-center">Validade</div>
-                <div className="col-span-1 text-center">Qtd</div>
-                <div className="col-span-1 text-center">Sep.</div>
+              <div className="bg-slate-900 text-white text-[11px] font-bold grid grid-cols-12 px-3 py-2.5 text-left items-center">
+                <div className="col-span-1 text-center">Check</div>
+                <div className="col-span-1">Cdgo</div>
+                <div className="col-span-3">Produto / Local</div>
+                <div className="col-span-2">Fornec./Fab.</div>
+                <div className="col-span-1 text-center">Validade</div>
+                <div className="col-span-1 text-center">Qtde</div>
+                <div className="col-span-1 text-center">Q. Sep</div>
+                <div className="col-span-2 text-right">Vr. Unit / Total</div>
               </div>
 
               {items.map((item) => {
@@ -509,12 +573,15 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                   item.expirationDate && item.expirationDate !== '-'
                     ? item.expirationDate
                     : extractExpirationDate(item.lotInfo) || '-';
+                const uPrice = Number(item.unitPrice) || 0;
+                const tPrice =
+                  Number(item.totalPrice) || uPrice * item.quantityOrdered || 0;
 
                 return (
                   <div
                     key={item.id}
                     className={`grid grid-cols-12 px-3 py-3 items-center text-xs transition-colors hover:bg-slate-50/80 ${
-                      item.checked ? 'bg-emerald-50/60' : ''
+                      item.checked ? 'bg-emerald-50/70' : ''
                     }`}
                   >
                     {/* Checkbox button */}
@@ -523,6 +590,7 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                         type="button"
                         onClick={() => toggleItemCheck(item.id)}
                         className="p-1 text-emerald-600 hover:scale-110 transition-transform"
+                        title="Dar check neste item"
                       >
                         {item.checked ? (
                           <CheckSquare className="w-5 h-5 text-emerald-600 fill-emerald-100" />
@@ -532,32 +600,37 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                       </button>
                     </div>
 
-                    {/* SKU & Location */}
-                    <div className="col-span-2 sm:col-span-1 font-mono pr-1">
+                    {/* SKU */}
+                    <div className="col-span-1 font-mono pr-1">
                       <span className="font-black text-slate-900 text-xs block">
                         {item.code}
                       </span>
-                      {item.location && item.location !== '-' && (
-                        <span className="inline-block text-[9px] bg-slate-100 text-slate-600 px-1 py-0.5 rounded font-semibold border border-slate-200 mt-0.5 truncate max-w-full">
-                          {item.location}
-                        </span>
-                      )}
                     </div>
 
-                    {/* Produto (Description) */}
-                    <div className="col-span-4 pr-2">
+                    {/* Produto (Description), Local & Lot */}
+                    <div
+                      onClick={() => toggleItemCheck(item.id)}
+                      className="col-span-3 pr-2 cursor-pointer"
+                    >
                       <p
                         className={`font-bold text-slate-900 ${
-                          item.checked ? 'line-through text-slate-500' : ''
+                          item.checked ? 'line-through text-emerald-800' : ''
                         }`}
                       >
                         {item.description}
                       </p>
-                      {item.lotInfo && (
-                        <span className="text-[10px] text-slate-400 font-mono block mt-0.5">
-                          {item.lotInfo}
-                        </span>
-                      )}
+                      <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                        {item.location && item.location !== '-' && (
+                          <span className="inline-block text-[10px] bg-slate-100 text-slate-700 px-1.5 py-0.2 rounded font-bold border border-slate-200">
+                            Local: {item.location}
+                          </span>
+                        )}
+                        {item.lotInfo && (
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            {item.lotInfo}
+                          </span>
+                        )}
+                      </div>
                     </div>
 
                     {/* Fornecedor */}
@@ -568,8 +641,8 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                     </div>
 
                     {/* Validade */}
-                    <div className="col-span-2 text-center">
-                      <span className="inline-block bg-amber-50 text-amber-900 border border-amber-300 px-2 py-0.5 rounded-md font-mono font-bold text-[11px]">
+                    <div className="col-span-1 text-center">
+                      <span className="inline-block bg-amber-50 text-amber-900 border border-amber-300 px-1.5 py-0.5 rounded-md font-mono font-bold text-[10px]">
                         {validade}
                       </span>
                     </div>
@@ -605,6 +678,22 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                           Falta {falta}
                         </span>
                       )}
+                    </div>
+
+                    {/* Unit Price & Total Price */}
+                    <div className="col-span-2 text-right font-mono">
+                      <span className="text-xs font-black text-emerald-700 block">
+                        R${' '}
+                        {tPrice.toLocaleString('pt-BR', {
+                          minimumFractionDigits: 2,
+                        })}
+                      </span>
+                      <span className="text-[10px] text-slate-500 block">
+                        Unit: R${' '}
+                        {uPrice.toLocaleString('pt-BR', {
+                          minimumFractionDigits: 2,
+                        })}
+                      </span>
                     </div>
                   </div>
                 );
