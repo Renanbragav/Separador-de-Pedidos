@@ -1,0 +1,34 @@
+{
+  "entities": {
+    "Order": {
+      "title": "Order",
+      "description": "Pedido de expedição com itens, status, arquivos e assinatura digital",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "orderNumber": { "type": "string" },
+        "dateCad": { "type": "string" },
+        "clientName": { "type": "string" },
+        "clientFantasia": { "type": "string" },
+        "sellerName": { "type": "string" },
+        "sellerNormalized": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["Pendente", "Separando", "Conferido", "Com Pendências", "Faturado"]
+        },
+        "items": { "type": "array" },
+        "totalItems": { "type": "number" },
+        "totalValue": { "type": "number" },
+        "createdAt": { "type": "number" },
+        "dateKey": { "type": "string" }
+      },
+      "required": ["id", "orderNumber", "sellerNormalized", "status", "createdAt", "dateKey"]
+    }
+  },
+  "firestore": {
+    "/orders/{orderId}": {
+      "schema": "Order",
+      "description": "Coleção global de pedidos de expedição"
+    }
+  }
+}

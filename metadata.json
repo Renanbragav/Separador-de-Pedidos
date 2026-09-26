@@ -1,0 +1,6 @@
+{
+  "name": "Organizador de Expedição - Separador de Pedidos",
+  "description": "Sistema de gestão de pedidos de expedição com leitura e checagem inteligente por IA, assinatura digital e acompanhamento em tempo real para vendedores e estoque.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
